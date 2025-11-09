@@ -1,6 +1,6 @@
 {
-  "name": "Поиск ближайшего заведения общепита",
-  "short_name": "Ближайшее кафе",
+  "name": "Ближайшее заведение общепита (OSM / Overpass)",
+  "short_name": "Общепит рядом",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#ffffff",
