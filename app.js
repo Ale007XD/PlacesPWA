@@ -1,30 +1,50 @@
-// Глобальные переменные
+// Polaris Alpha: PWA с Leaflet + Overpass для поиска ближайшего общепита в ЮВА
+// Без Google API. Использует OSM-данные (amenity=...).
+
 let map;
 let userMarker = null;
-let placesService = null;
-let renderObjects = []; // маркеры/линии ближайших
-let currentNearest = null;
+let renderObjects = []; // маркеры/линии найденных мест
 
-// Инициализация приложения: вызывается как callback=initApp в скрипте Google Maps
-window.initApp = function () {
+// Центр по умолчанию (Бангкок), чтобы было релевантно ЮВА до определения геолокации
+const DEFAULT_CENTER = { lat: 13.7563, lng: 100.5018 };
+const DEFAULT_ZOOM = 13;
+
+// Типы общепита (OSM amenity)
+const AMENITY_TYPES = {
+  restaurant: ["restaurant"],
+  cafe: ["cafe"],
+  fast_food: ["fast_food"],
+  bar: ["bar"],
+  pub: ["pub"],
+  food_court: ["food_court"],
+  biergarten: ["biergarten"],
+  all: [
+    "restaurant",
+    "cafe",
+    "fast_food",
+    "bar",
+    "pub",
+    "food_court",
+    "biergarten"
+  ]
+};
+
+// Инициализация после загрузки DOM
+document.addEventListener("DOMContentLoaded", () => {
   initMap();
   initUI();
   registerServiceWorker();
-};
+});
 
-// Инициализация карты
+// Инициализация карты Leaflet
 function initMap() {
-  const defaultCenter = { lat: 55.7558, lng: 37.6173 }; // Москва по умолчанию
+  map = L.map("map").setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], DEFAULT_ZOOM);
 
-  map = new google.maps.Map(document.getElementById("map"), {
-    center: defaultCenter,
-    zoom: 13,
-    mapTypeControl: false,
-    streetViewControl: false,
-    fullscreenControl: true,
-  });
-
-  placesService = new google.maps.places.PlacesService(map);
+  // OSM тайлы (публичный сервер, только для легкого использования; для продакшена лучше свой/провайдер)
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "© OpenStreetMap contributors"
+  }).addTo(map);
 }
 
 // Инициализация UI
@@ -33,20 +53,21 @@ function initUI() {
   findBtn.addEventListener("click", onFindClick);
 }
 
-// Обработчик кнопки "Найти ближайшее заведение"
+// Обработка клика "Найти ближайшее заведение"
 function onFindClick() {
   if (!navigator.geolocation) {
     setStatus("Геолокация не поддерживается вашим браузером.", true);
     return;
   }
 
-  // Считываем параметры
-  const type = document.getElementById("placeType").value;
+  const amenityKey = document.getElementById("placeType").value;
+  const onlyName = document.getElementById("onlyName").checked;
   let radius = parseInt(document.getElementById("radius").value, 10);
-  const openNow = document.getElementById("openNow").checked;
 
   if (isNaN(radius) || radius < 100) radius = 100;
   if (radius > 5000) radius = 5000;
+
+  const amenities = AMENITY_TYPES[amenityKey] || AMENITY_TYPES.all;
 
   setStatus("Определяем ваше местоположение...");
 
@@ -54,23 +75,31 @@ function onFindClick() {
     (pos) => {
       const userLocation = {
         lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
+        lng: pos.coords.longitude
       };
 
       showUserLocation(userLocation);
-      setStatus("Местоположение определено. Ищем заведения поблизости...");
 
-      searchNearestPlace({
+      setStatus(
+        "Местоположение определено. Ищем заведения поблизости (" +
+          radius +
+          " м)..."
+      );
+
+      searchNearestWithOverpass({
         userLocation,
-        type,
+        amenities,
         radius,
-        openNow,
+        onlyName
       });
     },
     (err) => {
       console.error(err);
       if (err.code === err.PERMISSION_DENIED) {
-        setStatus("Доступ к геолокации запрещен. Разрешите доступ и попробуйте снова.", true);
+        setStatus(
+          "Доступ к геолокации запрещен. Разрешите доступ и попробуйте снова.",
+          true
+        );
       } else {
         setStatus("Не удалось получить геолокацию. Повторите попытку.", true);
       }
@@ -78,247 +107,288 @@ function onFindClick() {
     {
       enableHighAccuracy: true,
       timeout: 10000,
-      maximumAge: 0,
+      maximumAge: 0
     }
   );
 }
 
-// Отображение местоположения пользователя
+// Показать маркер пользователя
 function showUserLocation(location) {
   if (userMarker) {
-    userMarker.setMap(null);
+    userMarker.remove();
   }
 
-  userMarker = new google.maps.Marker({
-    position: location,
-    map,
-    title: "Вы здесь",
-    icon: {
-      path: google.maps.SymbolPath.CIRCLE,
-      scale: 8,
-      fillColor: "#1976d2",
-      fillOpacity: 1,
-      strokeColor: "#ffffff",
-      strokeWeight: 2,
-    },
-  });
+  userMarker = L.circleMarker([location.lat, location.lng], {
+    radius: 7,
+    color: "#ffffff",
+    weight: 2,
+    fillColor: "#1976d2",
+    fillOpacity: 1
+  }).addTo(map);
 
-  map.setCenter(location);
-  map.setZoom(15);
+  map.setView([location.lat, location.lng], 16);
 }
 
-// Поиск ближайшего заведения по параметрам
-function searchNearestPlace({ userLocation, type, radius, openNow }) {
-  if (!placesService) {
-    setStatus("Сервис Google Places не инициализирован.", true);
-    return;
-  }
-
+// Запрос к Overpass API
+function searchNearestWithOverpass({ userLocation, amenities, radius, onlyName }) {
   clearRenderObjects();
-  currentNearest = null;
 
-  const request = {
-    location: userLocation,
-    radius: radius,
-    type: [type],
-  };
+  // Формируем регулярку по типам amenity
+  const amenityRegex = amenities.join("|");
 
-  if (openNow) {
-    request.openNow = true;
-  }
+  // Overpass QL:
+  // around:radius,lat,lon — поиск в радиусе
+  // amenity~"..." — нужные типы
+  let query = `
+    [out:json][timeout:25];
+    (
+      node["amenity"~"${amenityRegex}"](around:${radius},${userLocation.lat},${userLocation.lng});
+      way["amenity"~"${amenityRegex}"](around:${radius},${userLocation.lat},${userLocation.lng});
+      relation["amenity"~"${amenityRegex}"](around:${radius},${userLocation.lat},${userLocation.lng});
+    );
+    out center;
+  `;
 
-  placesService.nearbySearch(request, (results, status) => {
-    if (
-      status !== google.maps.places.PlacesServiceStatus.OK ||
-      !results ||
-      results.length === 0
-    ) {
-      console.warn("Nearby search status:", status);
-      const openFilterText = openNow ? " (только открытые сейчас)" : "";
+  setStatus("Отправляем запрос к Overpass API...");
+
+  // Публичный сервер Overpass. Для серьезных проектов — поднимайте свой.
+  const url = "https://overpass-api.de/api/interpreter";
+
+  fetch(url, {
+    method: "POST",
+    body: query,
+    headers: {
+      "Content-Type": "text/plain"
+    }
+  })
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error("Ошибка Overpass: " + res.status);
+      }
+      return res.json();
+    })
+    .then((data) => {
+      handleOverpassResponse(data, { userLocation, radius, onlyName });
+    })
+    .catch((err) => {
+      console.error(err);
       setStatus(
-        "Не найдено заведений в радиусе " + radius + " м" + openFilterText + ".",
+        "Ошибка при запросе к Overpass API. Попробуйте еще раз позже.",
         true
       );
       setPlaceDetails(
-        "Попробуйте увеличить радиус, изменить тип заведения или отключить фильтр по открытости."
+        "Публичный Overpass-сервер мог быть перегружен. Для продакшена рекомендуется собственный сервер."
       );
-      return;
-    }
-
-    // Строим маркеры и находим ближайшее
-    const enriched = results
-      .filter((p) => p.geometry && p.geometry.location)
-      .map((place) => {
-        const placeLoc = {
-          lat: place.geometry.location.lat(),
-          lng: place.geometry.location.lng(),
-        };
-        const distanceKm = haversineDistance(userLocation, placeLoc);
-        return { place, distanceKm, placeLoc };
-      });
-
-    if (!enriched.length) {
-      setStatus("Не удалось определить координаты найденных мест.", true);
-      return;
-    }
-
-    // Маркеры всех найденных
-    enriched.forEach(({ place, placeLoc }) => {
-      const marker = new google.maps.Marker({
-        map,
-        position: placeLoc,
-        title: place.name,
-        icon: {
-          url: "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
-        },
-      });
-
-      const content = `
-        <div style="font-size:13px;">
-          <strong>${place.name || "Заведение"}</strong><br />
-          ${(place.vicinity || place.formatted_address || "")}
-        </div>
-      `;
-      const infowindow = new google.maps.InfoWindow({ content });
-
-      marker.addListener("click", () => {
-        infowindow.open(map, marker);
-      });
-
-      renderObjects.push(marker);
     });
-
-    // Нахождение ближайшего
-    enriched.sort((a, b) => a.distanceKm - b.distanceKm);
-    currentNearest = enriched[0];
-
-    highlightNearest(userLocation, currentNearest);
-
-    setStatus(
-      "Найдено заведений: " +
-        enriched.length +
-        ". Ближайшее выделено зелёным маркером.",
-      false
-    );
-  });
 }
 
-// Подсветка ближайшего заведения, линия, инфо
-function highlightNearest(userLocation, nearestData) {
-  if (!nearestData) return;
-
-  const { place, distanceKm, placeLoc } = nearestData;
-  const distanceM = Math.round(distanceKm * 1000);
-
-  // Зеленый маркер для ближайшего заведения
-  const nearestMarker = new google.maps.Marker({
-    map,
-    position: placeLoc,
-    title: (place.name || "Ближайшее заведение") + " (ближайшее)",
-    icon: {
-      url: "https://maps.google.com/mapfiles/ms/icons/green-dot.png",
-    },
-    zIndex: 999,
-  });
-  renderObjects.push(nearestMarker);
-
-  // Линия от пользователя до заведения
-  const line = new google.maps.Polyline({
-    path: [userLocation, placeLoc],
-    geodesic: true,
-    strokeColor: "#388e3c",
-    strokeOpacity: 0.9,
-    strokeWeight: 3,
-    map,
-  });
-  renderObjects.push(line);
-
-  // Подгоняем границы карты
-  const bounds = new google.maps.LatLngBounds();
-  bounds.extend(userLocation);
-  bounds.extend(placeLoc);
-  map.fitBounds(bounds);
-
-  // Подробности: отдельно запросим детали
-  placesService.getDetails(
-    {
-      placeId: place.place_id,
-      fields: [
-        "name",
-        "vicinity",
-        "formatted_address",
-        "rating",
-        "user_ratings_total",
-        "opening_hours",
-        "website",
-        "formatted_phone_number",
-        "geometry",
-      ],
-    },
-    (details, status) => {
-      let infoPlace = place;
-      if (
-        status === google.maps.places.PlacesServiceStatus.OK &&
-        details
-      ) {
-        infoPlace = { ...place, ...details };
-      }
-      updatePlaceDetails(infoPlace, distanceM);
-    }
-  );
-}
-
-// Обновление блока результата
-function updatePlaceDetails(place, distanceM) {
-  if (!place) {
-    setPlaceDetails("Не удалось получить данные о заведении.");
+// Обработка ответа Overpass
+function handleOverpassResponse(data, { userLocation, radius, onlyName }) {
+  if (!data || !Array.isArray(data.elements)) {
+    setStatus("Неверный ответ Overpass API.", true);
+    setPlaceDetails("Проверьте соединение или попробуйте позже.");
     return;
   }
 
-  const name = place.name || "Заведение";
-  const address =
-    place.formatted_address || place.vicinity || "Адрес не указан";
-  const rating = place.rating
-    ? place.rating.toFixed(1) + " ★ (" + (place.user_ratings_total || 0) + " отзывов)"
-    : "Рейтинг неизвестен";
+  // Преобразуем элементы в список точек
+  let places = data.elements
+    .map((el) => {
+      // Для node координаты lat/lon, для way/relation — center.lat/center.lon
+      let lat = el.lat;
+      let lon = el.lon;
 
-  const distanceStr =
-    distanceM < 1000
-      ? distanceM + " м"
-      : (distanceM / 1000).toFixed(2) + " км";
+      if (!lat || !lon) {
+        if (el.center && el.center.lat && el.center.lon) {
+          lat = el.center.lat;
+          lon = el.center.lon;
+        }
+      }
 
-  let openStatusHtml = "";
-  if (place.opening_hours && typeof place.opening_hours.isOpen === "function") {
-    const openNow = place.opening_hours.isOpen();
-    openStatusHtml = `<div class="place-open ${
-      openNow ? "open" : "closed"
-    }">${openNow ? "Сейчас открыто" : "Сейчас закрыто"}</div>`;
+      if (!lat || !lon) return null;
+
+      const tags = el.tags || {};
+      const name = tags.name || tags["name:en"] || "";
+
+      if (onlyName && !name) {
+        // Отбрасываем "безымянные" объекты, если включен фильтр
+        return null;
+      }
+
+      // Простая классификация типа по amenity
+      const amenity = tags.amenity || "";
+
+      return {
+        id: el.id,
+        type: el.type,
+        lat,
+        lon,
+        name,
+        amenity,
+        tags
+      };
+    })
+    .filter(Boolean);
+
+  if (!places.length) {
+    setStatus(
+      "В радиусе " + radius + " м не найдено подходящих заведений.",
+      true
+    );
+    setPlaceDetails(
+      "Попробуйте увеличить радиус, изменить тип заведения или отключить фильтр по названию."
+    );
+    return;
   }
 
-  const phone = place.formatted_phone_number
-    ? `<div class="place-meta">Телефон: ${place.formatted_phone_number}</div>`
+  // Считаем расстояния и находим ближайшее
+  places = places.map((p) => {
+    const distanceKm = haversineDistance(
+      { lat: userLocation.lat, lng: userLocation.lng },
+      { lat: p.lat, lng: p.lon }
+    );
+    return { ...p, distanceKm };
+  });
+
+  places.sort((a, b) => a.distanceKm - b.distanceKm);
+  const nearest = places[0];
+
+  // Маркеры всех найденных
+  places.forEach((p) => {
+    const marker = L.marker([p.lat, p.lon], {
+      title: p.name || p.amenity || "Заведение общепита"
+    }).addTo(map);
+
+    const label =
+      (p.name || "Заведение общепита") +
+      (p.amenity ? ` (${p.amenity})` : "");
+
+    marker.bindPopup(
+      `<div style="font-size:13px;">
+        <strong>${escapeHtml(label)}</strong><br/>
+        Расстояние: ${formatDistance(p.distanceKm)}
+      </div>`
+    );
+
+    renderObjects.push(marker);
+  });
+
+  // Выделяем ближайшее: зелёный маркер + линия
+  highlightNearest(userLocation, nearest);
+
+  setStatus(
+    "Найдено заведений: " +
+      places.length +
+      ". Ближайшее выделено зелёным маркером.",
+    false
+  );
+}
+
+// Подсветка ближайшего заведения
+function highlightNearest(userLocation, nearest) {
+  if (!nearest) return;
+
+  const nearestLatLng = [nearest.lat, nearest.lon];
+
+  // Зеленый маркер
+  const nearestMarker = L.marker(nearestLatLng, {
+    title: (nearest.name || "Ближайшее заведение") + " (ближайшее)",
+    icon: L.icon({
+      iconUrl: "https://maps.google.com/mapfiles/ms/icons/green-dot.png",
+      iconSize: [32, 32],
+      iconAnchor: [16, 32],
+      popupAnchor: [0, -28]
+    })
+  }).addTo(map);
+
+  renderObjects.push(nearestMarker);
+
+  // Линия от пользователя до заведения
+  const line = L.polyline(
+    [
+      [userLocation.lat, userLocation.lng],
+      [nearest.lat, nearest.lon]
+    ],
+    {
+      color: "#388e3c",
+      weight: 3,
+      opacity: 0.9
+    }
+  ).addTo(map);
+
+  renderObjects.push(line);
+
+  // Подгоняем карту
+  const bounds = L.latLngBounds(
+    [userLocation.lat, userLocation.lng],
+    nearestLatLng
+  );
+  map.fitBounds(bounds, { padding: [40, 40] });
+
+  // Обновляем инфо-блок
+  updatePlaceDetails(nearest);
+}
+
+// Обновить блок информации о ближайшем заведении
+function updatePlaceDetails(place) {
+  if (!place) {
+    setPlaceDetails("Не удалось определить ближайшее заведение.");
+    return;
+  }
+
+  const distanceStr = formatDistance(place.distanceKm);
+
+  const name = place.name || "Без названия";
+  const amenity = place.amenity || "общепит";
+
+  const tags = place.tags || {};
+  const cuisine = tags.cuisine ? `Кухня: ${tags.cuisine}` : "";
+  const addrParts = [
+    tags["addr:street"],
+    tags["addr:housenumber"],
+    tags["addr:city"],
+    tags["addr:suburb"]
+  ].filter(Boolean);
+  const address = addrParts.join(", ");
+
+  const openingHours = tags.opening_hours
+    ? `Часы работы: ${tags.opening_hours}`
     : "";
 
-  const website = place.website
-    ? `<div class="place-link"><a href="${place.website}" target="_blank" rel="noopener noreferrer">Сайт заведения</a></div>`
-    : "";
+  const website = tags.website || tags["contact:website"] || "";
+  const phone =
+    tags.phone || tags["contact:phone"] || tags["contact:mobile"] || "";
 
-  const mapsLink = place.place_id
-    ? `<div class="place-link">
-         <a href="https://www.google.com/maps/place/?q=place_id:${place.place_id}"
-            target="_blank" rel="noopener noreferrer">Открыть в Google Картах</a>
-       </div>`
-    : "";
+  const osmUrl = `https://www.openstreetmap.org/${place.type}/${place.id}`;
 
   const html = `
-    <div class="place-name">${name}</div>
-    <div class="place-address">${address}</div>
-    <div class="place-meta">Расстояние: ${distanceStr}</div>
-    <div class="place-rating">Рейтинг: ${rating}</div>
-    ${openStatusHtml}
-    ${phone}
-    ${website}
-    ${mapsLink}
+    <div class="place-name">${escapeHtml(name)}</div>
+    <div class="place-address">${
+      address ? escapeHtml(address) : "Адрес по OSM не указан"
+    }</div>
+    <div class="place-meta place-distance">Расстояние: ${distanceStr}</div>
+    <div class="place-meta">Тип: ${escapeHtml(amenity)}</div>
+    ${cuisine ? `<div class="place-meta">${escapeHtml(cuisine)}</div>` : ""}
+    ${
+      openingHours
+        ? `<div class="place-meta">${escapeHtml(openingHours)}</div>`
+        : ""
+    }
+    ${
+      phone
+        ? `<div class="place-meta">Телефон: ${escapeHtml(phone)}</div>`
+        : ""
+    }
+    ${
+      website
+        ? `<div class="place-meta"><a href="${escapeAttr(
+            website
+          )}" target="_blank" rel="noopener noreferrer">Сайт</a></div>`
+        : ""
+    }
+    <div class="place-tags">
+      Данные из OpenStreetMap — могут быть неточными. 
+      <a href="${osmUrl}" target="_blank" rel="noopener noreferrer">Посмотреть объект в OSM</a>
+    </div>
   `;
 
   setPlaceDetails(html);
@@ -339,16 +409,16 @@ function setPlaceDetails(html) {
 
 function clearRenderObjects() {
   renderObjects.forEach((obj) => {
-    if (obj && typeof obj.setMap === "function") {
-      obj.setMap(null);
+    if (obj && typeof obj.remove === "function") {
+      obj.remove();
     }
   });
   renderObjects = [];
 }
 
-// Haversine: расстояние в км
+// Расстояние (Haversine), результат в км
 function haversineDistance(a, b) {
-  const R = 6371; // км
+  const R = 6371;
   const dLat = deg2rad(b.lat - a.lat);
   const dLng = deg2rad(b.lng - a.lng);
   const lat1 = deg2rad(a.lat);
@@ -370,6 +440,25 @@ function haversineDistance(a, b) {
 
 function deg2rad(deg) {
   return (deg * Math.PI) / 180;
+}
+
+function formatDistance(km) {
+  const meters = Math.round(km * 1000);
+  if (meters < 1000) return meters + " м";
+  return (meters / 1000).toFixed(2) + " км";
+}
+
+// Простейшая экранизация для HTML
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function escapeAttr(str) {
+  return escapeHtml(str).replace(/"/g, "&quot;");
 }
 
 // Регистрация Service Worker
