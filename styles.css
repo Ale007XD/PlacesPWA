@@ -122,7 +122,7 @@ body {
   line-height: 1.4;
 }
 
-/* Оформление блока результата */
+/* Оформление результата */
 
 .place-name {
   font-weight: 600;
@@ -139,29 +139,22 @@ body {
   margin-bottom: 4px;
 }
 
-.place-rating {
-  color: #ff9800;
-}
-
-.place-open {
+.place-distance {
   font-weight: 500;
 }
 
-.place-open.open {
-  color: #2e7d32;
+.place-tags {
+  font-size: 12px;
+  color: #777;
+  margin-top: 4px;
 }
 
-.place-open.closed {
-  color: #c62828;
-}
+/* Footer */
 
-.place-link a {
-  color: #1976d2;
-  text-decoration: none;
-}
-
-.place-link a:hover {
-  text-decoration: underline;
+.footer {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #777;
 }
 
 /* Desktop layout */
