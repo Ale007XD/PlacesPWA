@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>Ближайшее заведение общепита</title>
+  <title>Ближайшее заведение общепита (OSM / Overpass)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- PWA -->
@@ -11,12 +11,20 @@
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
 
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
   <!-- Styles -->
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <header class="header">
-  <h1>Поиск ближайшего заведения общепита</h1>
+  <h1>Ближайшее заведение общепита (OSM / Overpass)</h1>
 </header>
 
 <main class="main">
@@ -26,10 +34,12 @@
       <select id="placeType">
         <option value="restaurant">Рестораны</option>
         <option value="cafe">Кафе</option>
+        <option value="fast_food">Фастфуд</option>
         <option value="bar">Бары</option>
-        <option value="bakery">Пекарни</option>
-        <option value="meal_takeaway">Еда навынос</option>
-        <option value="food">Любые (общепит)</option>
+        <option value="pub">Пабы</option>
+        <option value="food_court">Фудкорты</option>
+        <option value="biergarten">Пивные сады</option>
+        <option value="all">Все типы (общепит)</option>
       </select>
     </div>
 
@@ -46,8 +56,8 @@
     </div>
 
     <div class="control-row inline">
-      <label for="openNow">Только открытые сейчас</label>
-      <input type="checkbox" id="openNow" />
+      <label for="onlyName">Только с названием (отсечь "пустые" точки)</label>
+      <input type="checkbox" id="onlyName" checked />
     </div>
 
     <button id="findBtn">Найти ближайшее заведение</button>
@@ -59,19 +69,25 @@
     <div id="info">
       <h2>Результат</h2>
       <div id="placeDetails">
-        Выберите параметры и нажмите "Найти ближайшее заведение".
+        Приложение использует OpenStreetMap и Overpass API. Разрешите доступ к геолокации,
+        выберите тип заведения и радиус, затем нажмите "Найти ближайшее заведение".
       </div>
     </div>
   </section>
+
+  <footer class="footer">
+    Данные: © OpenStreetMap contributors. Будьте внимательны: в отдельных районах ЮВА карта может быть неполной.
+  </footer>
 </main>
 
-<script src="app.js"></script>
-
-<!-- Google Maps JS API (замени YOUR_GOOGLE_MAPS_API_KEY) -->
+<!-- Leaflet JS -->
 <script
-  async
-  defer
-  src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places&callback=initApp">
-</script>
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-o9N1j7kGStb6ZkqQJbZLrYt+JwEiRkVQvQ4v1r5J0Xk="
+  crossorigin=""
+></script>
+
+<!-- App logic -->
+<script src="app.js"></script>
 </body>
 </html>
